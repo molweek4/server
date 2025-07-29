@@ -4,8 +4,11 @@ import { WebSocketServer } from 'ws';
 const wss = new WebSocketServer({ port: 8080 });
 console.log("WebSocket 서버 시작됨: ws://localhost:8080");
 
-let players = [];
+const MAX_PLAYERS = 2;
+let players = new Array(MAX_PLAYERS).fill(null); // [null, null]
+
 let blocks = generateBlocks();
+let gameStarted = false;
 
 function generateBlocks(){
   const blocks = [];
@@ -44,21 +47,21 @@ function addBlockRow() {
 
 
 wss.on('connection', (ws) => {
-  if (players.length >= 2) {
+  const index = players.findIndex(p => p === null);
+  if (index === -1) {
     ws.send(JSON.stringify({ type: "error", message: "최대 2명까지만 접속 가능합니다." }));
     ws.close();
     return;
   }
 
-  const playerId = `player${players.length + 1}`;
-  players.push({ id: playerId, ws });
+  const playerId = `player${index + 1}`;
+  players[index] = { id: playerId, ws, ready: false };
+
   ws.send(JSON.stringify({ type: 'assign_id', playerId }));
-  ws.send(JSON.stringify({
-    type: 'init_blocks',
-    blocks
-  }));
+  ws.send(JSON.stringify({ type: 'init_blocks', blocks }));
 
   console.log(`🔗 ${playerId} 연결됨`);
+
 
   ws.on('message', (msg) => {
     try {
@@ -66,7 +69,7 @@ wss.on('connection', (ws) => {
       if (data.type === 'paddle_update') {
         // 상대방에게만 전달
         players.forEach(p => {
-          if (p.ws !== ws && p.ws.readyState === 1) {
+          if (p && p.ws !== ws && p.ws.readyState === 1) {
             p.ws.send(JSON.stringify({
               type: 'opponent_paddle',
               playerId: data.playerId,
@@ -95,6 +98,24 @@ wss.on('connection', (ws) => {
             }))
           }
         })
+      }else if (data.type === 'player_ready'){
+        const player = players.find(p => p.id === data.playerId);
+        if (player) {
+          player.ready = true;
+
+
+          // 두 플레이어가 모두 준비됐는지 확인
+          if (players.filter(p => p !== null).length === 2 &&
+              players.every(p => p && p.ready)) {
+            gameStarted = true;
+
+            players.forEach(p => {
+              if (p && p.ws.readyState === 1) {
+                p.ws.send(JSON.stringify({ type: "start_game" }));
+              }
+            });
+          }
+        }
       }
     } catch (err) {
       console.error("메시지 파싱 실패:", err);
@@ -103,11 +124,17 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     console.log(`${playerId} 연결 해제`);
-    players = players.filter(p => p.ws !== ws);
+    players[index] = null;
+
+    if (players.every(p => p === null)) {
+      gameStarted = false;
+    }
   });
 });
 
 setInterval(() => {
+  if(!gameStarted) return;
+
   const newRow = addBlockRow();
   console.log("새로운 블록 줄 추가됨:", newRow); // 추가
 
@@ -116,7 +143,7 @@ setInterval(() => {
   blocks.push(...newRow);
 
   players.forEach(p => {
-    if (p.ws.readyState === 1) {
+    if (p && p.ws.readyState === 1) {
       p.ws.send(JSON.stringify({
         type: 'block_add',
         newRow
